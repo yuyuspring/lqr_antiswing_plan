@@ -39,7 +39,7 @@ class ActuatorLayout:
 
 @dataclass
 class SimulationConfig:
-    dt_s: float = 0.002
+    dt_s: float = 0.01
     duration_s: float = 55.0
     initial_position_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
     initial_velocity_mps: np.ndarray = field(default_factory=lambda: np.zeros(3))
@@ -68,7 +68,7 @@ class ScenarioConfig:
 class HorizontalMappingConfig:
     pitch_from_ax_sign: float = 1.0
     roll_from_ay_sign: float = -1.0
-    max_tilt_deg: float = 20.0
+    max_tilt_deg: float = 35.0
 
 
 @dataclass
@@ -90,8 +90,11 @@ class LqrConfig:
 @dataclass
 class ReplayConfig:
     dataset_csv_path: str = "/home/hcy/work_space/xp_16_7/src/app/planner/test/lqr_analysis/data_15/work/lqr_comparison.csv"
-    batch_dt_s: float = 0.02
+    lqr_dt_s: float = 0.02
+    dynamics_dt_s: float = 0.001
     execute_steps_per_batch: int = 5
+    swing_model: str = "3d_rope"
+    compare_swing_models: List[str] = field(default_factory=lambda: ["3d_rope", "planar_2d"])
 
 
 @dataclass

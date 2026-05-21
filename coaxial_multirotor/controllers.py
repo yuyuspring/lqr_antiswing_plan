@@ -5,7 +5,7 @@ import numpy as np
 from scipy import signal
 
 from .config import HorizontalMappingConfig, SystemConfig
-from .math_utils import DEG2RAD, RAD2DEG, clamp
+from .math_utils import DEG2RAD, RAD2DEG, clamp, internal_euler_to_user, user_body_rates_to_internal, user_euler_to_internal
 
 
 @dataclass
@@ -245,8 +245,8 @@ class CoaxialController:
         return clamp(motor_pwm, 0.0, self.max_pwm)
 
     def step(self, command: dict, truth: dict, dt_s: float, gravity_mps2: float) -> dict:
-        euler_deg = truth["euler_deg"]
-        body_rates_degps = truth["body_rates_degps"]
+        euler_deg = user_euler_to_internal(np.asarray(truth["euler_deg"], dtype=float))
+        body_rates_degps = user_body_rates_to_internal(np.asarray(truth["body_rates_degps"], dtype=float))
         position = truth["position_m"]
         velocity = truth["velocity_mps"]
         accel_world = truth["accel_world_mps2"]
@@ -290,7 +290,7 @@ class CoaxialController:
             )
         servo_roll = self.roll_axis.step(roll_cmd_deg, euler_deg[0], body_rates_degps[0], dt_s)
         servo_pitch = -self.pitch_axis.step(pitch_cmd_deg, euler_deg[1], body_rates_degps[1], dt_s)
-        servo_yaw = -self.yaw_axis.step(command.get("yaw_deg", 0.0), euler_deg[2], body_rates_degps[2], dt_s)
+        servo_yaw = -self.yaw_axis.step(-command.get("yaw_deg", 0.0), euler_deg[2], body_rates_degps[2], dt_s)
         servo_thro = self.altitude_axis.step(
             altitude_cmd_m=command.get("z_m", 0.0),
             altitude_m=position[2],
@@ -301,9 +301,10 @@ class CoaxialController:
             dt_s=dt_s,
         )
         motor_pwm = self.allocate_motors(servo_roll, servo_pitch, servo_yaw, servo_thro)
+        user_cmd = internal_euler_to_user(np.array([roll_cmd_deg, pitch_cmd_deg, -command.get("yaw_deg", 0.0)], dtype=float))
         return {
-            "roll_cmd_deg": roll_cmd_deg,
-            "pitch_cmd_deg": pitch_cmd_deg,
+            "roll_cmd_deg": user_cmd[0],
+            "pitch_cmd_deg": user_cmd[1],
             "servo_roll": servo_roll,
             "servo_pitch": servo_pitch,
             "servo_yaw": servo_yaw,

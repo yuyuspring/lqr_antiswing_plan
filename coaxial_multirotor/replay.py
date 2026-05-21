@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List
 
@@ -32,10 +33,11 @@ def plot_replay_summary(log: dict, save_path: str) -> None:
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     time_s = log["time_s"]
     figure, axes = plt.subplots(3, 2, figsize=(14, 12))
+    model_label = log.get("swing_model", "replay")
 
     axes[0, 0].plot(time_s, log["position_m"][:, 0], label="north/x")
     axes[0, 0].plot(time_s, log["position_m"][:, 1], label="east/y")
-    axes[0, 0].set_title("UAV Position")
+    axes[0, 0].set_title(f"UAV Position ({model_label})")
     axes[0, 0].grid(True)
     axes[0, 0].legend()
 
@@ -51,7 +53,7 @@ def plot_replay_summary(log: dict, save_path: str) -> None:
 
     axes[1, 0].plot(time_s, np.rad2deg(log["gyro_angle_x_rad"]), label="gyro_angle_x")
     axes[1, 0].plot(time_s, np.rad2deg(log["gyro_angle_y_rad"]), label="gyro_angle_y")
-    axes[1, 0].set_title("Swing Angles")
+    axes[1, 0].set_title(f"Swing Angles ({model_label})")
     axes[1, 0].set_ylabel("deg")
     axes[1, 0].grid(True)
     axes[1, 0].legend()
@@ -69,7 +71,7 @@ def plot_replay_summary(log: dict, save_path: str) -> None:
     axes[2, 0].plot(time_s, log["body_accel_ref_mps2"][:, 1], "--", label="ay_orig")
     axes[2, 0].plot(time_s, log["body_accel_cmd_mps2"][:, 1], label="ay_lqr")
     axes[2, 0].plot(time_s, log["body_accel_mps2"][:, 1], label="ay_resp")
-    axes[2, 0].set_title("Body Accel: Orig vs LQR vs Response")
+    axes[2, 0].set_title(f"Body Accel: Orig vs LQR vs Response ({model_label})")
     axes[2, 0].grid(True)
     axes[2, 0].legend(ncol=2)
 
@@ -82,27 +84,39 @@ def plot_replay_summary(log: dict, save_path: str) -> None:
     plt.close(figure)
 
 
-def run_lqr_replay_simulation(system: SystemConfig | None = None) -> dict:
-    system = system or build_default_config()
-    state = VehicleState.from_config(system)
-    controller = CoaxialController.build(system)
-    dynamics = CoaxialMultirotorDynamics(system)
-    lqr_controller = LqrSwingController(
-        LqrControllerConfig(
-            ropeLength=system.suspended_load.rope_length_m,
-            payloadMass=system.suspended_load.payload_mass_kg,
-            droneMass=system.vehicle.mass_kg,
-            dt=system.lqr.dt_s,
-            lqrAxMax=system.lqr.accel_limit_mps2,
-            lqrJerkMax=system.lqr.jerk_limit_mps3,
-        )
-    )
-    batches = load_lqr_batches(system.replay.dataset_csv_path)
-    step_dt_s = system.replay.batch_dt_s
-    execute_steps = system.replay.execute_steps_per_batch
-    total_steps = sum(min(len(batch), execute_steps) for batch in batches)
+def plot_replay_comparison(comparison_logs: Dict[str, dict], save_path: str) -> None:
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    colors = {"3d_rope": "tab:blue", "planar_2d": "tab:orange"}
 
-    log = {
+    for model_name, log in comparison_logs.items():
+        color = colors.get(model_name)
+        time_s = log["time_s"]
+        axes[0, 0].plot(time_s, log["body_velocity_mps"][:, 0], color=color, label=f"vx_resp {model_name}")
+        axes[0, 1].plot(time_s, np.rad2deg(log["gyro_angle_y_rad"]), color=color, label=f"gyro_y {model_name}")
+        axes[1, 0].plot(time_s, log["body_accel_mps2"][:, 0], color=color, label=f"ax_resp {model_name}")
+        axes[1, 1].plot(time_s, log["position_m"][:, 0], color=color, label=f"north {model_name}")
+
+    reference_log = next(iter(comparison_logs.values()))
+    time_s = reference_log["time_s"]
+    axes[0, 0].plot(time_s, reference_log["body_velocity_ref_mps"][:, 0], "k--", alpha=0.6, label="vx_orig")
+    axes[0, 0].plot(time_s, reference_log["body_velocity_lqr_mps"][:, 0], "k:", alpha=0.8, label="vx_lqr")
+    axes[0, 1].set_title("Swing Angle Y Comparison")
+    axes[0, 0].set_title("Body Velocity X Comparison")
+    axes[1, 0].set_title("Body Accel X Comparison")
+    axes[1, 1].set_title("North Position Comparison")
+
+    for axis in axes.flat:
+        axis.grid(True)
+        axis.legend()
+
+    figure.tight_layout()
+    figure.savefig(save_path, dpi=160)
+    plt.close(figure)
+
+
+def _build_replay_log(total_steps: int) -> dict:
+    return {
         "time_s": np.zeros(total_steps),
         "position_m": np.zeros((total_steps, 3)),
         "body_velocity_mps": np.zeros((total_steps, 3)),
@@ -118,9 +132,37 @@ def run_lqr_replay_simulation(system: SystemConfig | None = None) -> dict:
         "motor_pwm": np.zeros((total_steps, 8)),
     }
 
+
+def _run_single_lqr_replay_simulation(system: SystemConfig) -> dict:
+    swing_model = system.replay.swing_model
+    state = VehicleState.from_config(system)
+    dynamics_dt_s = system.replay.dynamics_dt_s
+    controller_system = deepcopy(system)
+    controller_system.simulation.dt_s = dynamics_dt_s
+    controller = CoaxialController.build(controller_system)
+    dynamics = CoaxialMultirotorDynamics(system)
+    lqr_controller = LqrSwingController(
+        LqrControllerConfig(
+            ropeLength=system.suspended_load.rope_length_m,
+            payloadMass=system.suspended_load.payload_mass_kg,
+            droneMass=system.vehicle.mass_kg,
+            dt=system.lqr.dt_s,
+            lqrAxMax=system.lqr.accel_limit_mps2,
+            lqrJerkMax=system.lqr.jerk_limit_mps3,
+        )
+    )
+    batches = load_lqr_batches(system.replay.dataset_csv_path)
+    lqr_dt_s = system.replay.lqr_dt_s
+    execute_steps = system.replay.execute_steps_per_batch
+    dynamics_steps_per_lqr_step = max(int(round(lqr_dt_s / dynamics_dt_s)), 1)
+    total_steps = sum(min(len(batch), execute_steps) * dynamics_steps_per_lqr_step for batch in batches)
+
+    log = _build_replay_log(total_steps)
+    log["swing_model"] = swing_model
+
     step_index = 0
     for batch in batches:
-        truth = state.as_truth()
+        truth = state.as_truth(swing_model)
         body_velocity = truth["body_velocity_mps"]
         theta_body_x = truth["gyro_angle_y_rad"]
         omega_body_x = truth["gyro_rate_y_radps"]
@@ -146,7 +188,6 @@ def run_lqr_replay_simulation(system: SystemConfig | None = None) -> dict:
             omega_body_y0=omega_body_y,
         )
         for local_index in range(min(len(batch), execute_steps)):
-            truth = state.as_truth()
             command = {
                 "horizontal_mode": "body_velocity_accel",
                 "vx_body_mps": batch_output["vx"][local_index],
@@ -156,25 +197,44 @@ def run_lqr_replay_simulation(system: SystemConfig | None = None) -> dict:
                 "z_m": 0.0,
                 "yaw_deg": 0.0,
             }
-            control = controller.step(command, truth, step_dt_s, system.vehicle.gravity_mps2)
-            state = dynamics.step(state, control["motor_pwm"], step_dt_s)
-            truth = state.as_truth()
-            log["time_s"][step_index] = step_index * step_dt_s
-            log["position_m"][step_index] = truth["position_m"]
-            log["body_velocity_mps"][step_index] = truth["body_velocity_mps"]
-            log["body_velocity_ref_mps"][step_index] = np.array([vx_ref_body[local_index], vy_ref_body[local_index]])
-            log["body_velocity_lqr_mps"][step_index] = np.array([batch_output["vx"][local_index], batch_output["vy"][local_index]])
-            log["body_accel_ref_mps2"][step_index] = np.array([ax_ref_body[local_index], ay_ref_body[local_index]])
-            log["body_accel_cmd_mps2"][step_index] = np.array([batch_output["ax"][local_index], batch_output["ay"][local_index]])
-            log["body_accel_mps2"][step_index] = truth["body_accel_mps2"]
-            log["gyro_angle_x_rad"][step_index] = truth["gyro_angle_x_rad"]
-            log["gyro_angle_y_rad"][step_index] = truth["gyro_angle_y_rad"]
-            log["gyro_rate_x_radps"][step_index] = truth["gyro_rate_x_radps"]
-            log["gyro_rate_y_radps"][step_index] = truth["gyro_rate_y_radps"]
-            log["motor_pwm"][step_index] = control["motor_pwm"]
-            step_index += 1
+            for _ in range(dynamics_steps_per_lqr_step):
+                truth = state.as_truth(swing_model)
+                control = controller.step(command, truth, dynamics_dt_s, system.vehicle.gravity_mps2)
+                state = dynamics.step(state, control["motor_pwm"], dynamics_dt_s)
+                truth = state.as_truth(swing_model)
+                log["time_s"][step_index] = step_index * dynamics_dt_s
+                log["position_m"][step_index] = truth["position_m"]
+                log["body_velocity_mps"][step_index] = truth["body_velocity_mps"]
+                log["body_velocity_ref_mps"][step_index] = np.array([vx_ref_body[local_index], vy_ref_body[local_index]])
+                log["body_velocity_lqr_mps"][step_index] = np.array([batch_output["vx"][local_index], batch_output["vy"][local_index]])
+                log["body_accel_ref_mps2"][step_index] = np.array([ax_ref_body[local_index], ay_ref_body[local_index]])
+                log["body_accel_cmd_mps2"][step_index] = np.array([batch_output["ax"][local_index], batch_output["ay"][local_index]])
+                log["body_accel_mps2"][step_index] = truth["body_accel_mps2"]
+                log["gyro_angle_x_rad"][step_index] = truth["gyro_angle_x_rad"]
+                log["gyro_angle_y_rad"][step_index] = truth["gyro_angle_y_rad"]
+                log["gyro_rate_x_radps"][step_index] = truth["gyro_rate_x_radps"]
+                log["gyro_rate_y_radps"][step_index] = truth["gyro_rate_y_radps"]
+                log["motor_pwm"][step_index] = control["motor_pwm"]
+                step_index += 1
 
-    plot_path = str(Path(system.logging.output_dir) / "lqr_replay_summary.png")
+    plot_path = str(Path(system.logging.output_dir) / f"lqr_replay_summary_{swing_model}.png")
     plot_replay_summary(log, plot_path)
     log["plot_path"] = plot_path
     return log
+
+
+def run_lqr_replay_simulation(system: SystemConfig | None = None) -> dict:
+    system = system or build_default_config()
+    return _run_single_lqr_replay_simulation(system)
+
+
+def run_lqr_replay_comparison(system: SystemConfig | None = None) -> dict:
+    system = system or build_default_config()
+    comparison_logs: Dict[str, dict] = {}
+    for swing_model in system.replay.compare_swing_models:
+        model_system = deepcopy(system)
+        model_system.replay.swing_model = swing_model
+        comparison_logs[swing_model] = _run_single_lqr_replay_simulation(model_system)
+    plot_path = str(Path(system.logging.output_dir) / "lqr_replay_comparison.png")
+    plot_replay_comparison(comparison_logs, plot_path)
+    return {"logs": comparison_logs, "plot_path": plot_path}

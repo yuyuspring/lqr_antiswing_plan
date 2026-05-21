@@ -84,3 +84,19 @@ def quaternion_to_euler321(quaternion: np.ndarray) -> np.ndarray:
 def body_rates_to_quaternion_derivative(quaternion: np.ndarray, body_rates_radps: np.ndarray) -> np.ndarray:
     omega_quat = np.array([0.0, *body_rates_radps])
     return 0.5 * quaternion_multiply(quaternion, omega_quat)
+
+
+def user_euler_to_internal(euler_rad: np.ndarray) -> np.ndarray:
+    return -np.asarray(euler_rad, dtype=float)
+
+
+def internal_euler_to_user(euler_rad: np.ndarray) -> np.ndarray:
+    return -np.asarray(euler_rad, dtype=float)
+
+
+def user_body_rates_to_internal(body_rates_radps: np.ndarray) -> np.ndarray:
+    return -np.asarray(body_rates_radps, dtype=float)
+
+
+def internal_body_rates_to_user(body_rates_radps: np.ndarray) -> np.ndarray:
+    return -np.asarray(body_rates_radps, dtype=float)
