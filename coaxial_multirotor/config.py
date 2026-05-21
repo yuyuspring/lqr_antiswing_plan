@@ -3,6 +3,8 @@ from typing import Dict, List
 
 import numpy as np
 
+from .suspended_load import SuspendedLoadConfig
+
 
 @dataclass
 class VehicleConfig:
@@ -76,12 +78,32 @@ class LoggingConfig:
 
 
 @dataclass
+class LqrConfig:
+    dt_s: float = 0.02
+    lookahead_steps: int = 0
+    executed_steps: int = 5
+    accel_limit_mps2: float = 5.0
+    jerk_limit_mps3: float = 10.0
+    gain_table_path: str = ""
+
+
+@dataclass
+class ReplayConfig:
+    dataset_csv_path: str = "/home/hcy/work_space/xp_16_7/src/app/planner/test/lqr_analysis/data_15/work/lqr_comparison.csv"
+    batch_dt_s: float = 0.02
+    execute_steps_per_batch: int = 5
+
+
+@dataclass
 class SystemConfig:
     vehicle: VehicleConfig
     layout: ActuatorLayout
+    suspended_load: SuspendedLoadConfig
     simulation: SimulationConfig
     scenario: ScenarioConfig
     horizontal_mapping: HorizontalMappingConfig
+    lqr: LqrConfig
+    replay: ReplayConfig
     logging: LoggingConfig
 
 
@@ -113,8 +135,11 @@ def build_default_config() -> SystemConfig:
     return SystemConfig(
         vehicle=vehicle,
         layout=layout,
+        suspended_load=SuspendedLoadConfig(),
         simulation=SimulationConfig(),
         scenario=ScenarioConfig(),
         horizontal_mapping=HorizontalMappingConfig(),
+        lqr=LqrConfig(),
+        replay=ReplayConfig(),
         logging=LoggingConfig(),
     )

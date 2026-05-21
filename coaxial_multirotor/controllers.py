@@ -127,7 +127,15 @@ class HorizontalController:
         self.velocity_pid_x.reset()
         self.velocity_pid_y.reset()
 
-    def step(self, pos_cmd_m: np.ndarray, pos_m: np.ndarray, vel_mps: np.ndarray, yaw_rad: float, gravity_mps2: float, dt_s: float) -> Tuple[float, float]:
+    def _body_accel_to_attitude(self, accel_body_x: float, accel_body_y: float, gravity_mps2: float) -> Tuple[float, float]:
+        pitch_cmd_rad = self.mapping.pitch_from_ax_sign * accel_body_x / gravity_mps2
+        roll_cmd_rad = self.mapping.roll_from_ay_sign * accel_body_y / gravity_mps2
+        return (
+            float(clamp(roll_cmd_rad * RAD2DEG, -self.mapping.max_tilt_deg, self.mapping.max_tilt_deg)),
+            float(clamp(pitch_cmd_rad * RAD2DEG, -self.mapping.max_tilt_deg, self.mapping.max_tilt_deg)),
+        )
+
+    def step_position(self, pos_cmd_m: np.ndarray, pos_m: np.ndarray, vel_mps: np.ndarray, yaw_rad: float, gravity_mps2: float, dt_s: float) -> Tuple[float, float]:
         vel_cmd_x = self.position_pid_x.step(pos_cmd_m[0] - pos_m[0], dt_s)
         vel_cmd_y = self.position_pid_y.step(pos_cmd_m[1] - pos_m[1], dt_s)
         accel_cmd_world_x = self.velocity_pid_x.step(vel_cmd_x - vel_mps[0], dt_s)
@@ -137,14 +145,26 @@ class HorizontalController:
         sin_yaw = np.sin(yaw_rad)
         accel_body_x = cos_yaw * accel_cmd_world_x + sin_yaw * accel_cmd_world_y
         accel_body_y = -sin_yaw * accel_cmd_world_x + cos_yaw * accel_cmd_world_y
+        return self._body_accel_to_attitude(accel_body_x, accel_body_y, gravity_mps2)
 
-        pitch_cmd_rad = self.mapping.pitch_from_ax_sign * accel_body_x / gravity_mps2
-        roll_cmd_rad = self.mapping.roll_from_ay_sign * accel_body_y / gravity_mps2
-        max_tilt_rad = self.mapping.max_tilt_deg * DEG2RAD
-        return (
-            float(clamp(roll_cmd_rad * RAD2DEG, -self.mapping.max_tilt_deg, self.mapping.max_tilt_deg)),
-            float(clamp(pitch_cmd_rad * RAD2DEG, -self.mapping.max_tilt_deg, self.mapping.max_tilt_deg)),
-        )
+    def step_world_velocity_accel(self, vel_cmd_world_mps: np.ndarray, accel_ff_world_mps2: np.ndarray, vel_world_mps: np.ndarray, yaw_rad: float, gravity_mps2: float, dt_s: float) -> Tuple[float, float]:
+        accel_cmd_world_x = accel_ff_world_mps2[0] + self.velocity_pid_x.step(vel_cmd_world_mps[0] - vel_world_mps[0], dt_s)
+        accel_cmd_world_y = accel_ff_world_mps2[1] + self.velocity_pid_y.step(vel_cmd_world_mps[1] - vel_world_mps[1], dt_s)
+        cos_yaw = np.cos(yaw_rad)
+        sin_yaw = np.sin(yaw_rad)
+        accel_body_x = cos_yaw * accel_cmd_world_x + sin_yaw * accel_cmd_world_y
+        accel_body_y = -sin_yaw * accel_cmd_world_x + cos_yaw * accel_cmd_world_y
+        return self._body_accel_to_attitude(accel_body_x, accel_body_y, gravity_mps2)
+
+    def step_position_velocity_accel(self, pos_cmd_m: np.ndarray, vel_ff_world_mps: np.ndarray, accel_ff_world_mps2: np.ndarray, pos_world_m: np.ndarray, vel_world_mps: np.ndarray, yaw_rad: float, gravity_mps2: float, dt_s: float) -> Tuple[float, float]:
+        vel_cmd_x = vel_ff_world_mps[0] + self.position_pid_x.step(pos_cmd_m[0] - pos_world_m[0], dt_s)
+        vel_cmd_y = vel_ff_world_mps[1] + self.position_pid_y.step(pos_cmd_m[1] - pos_world_m[1], dt_s)
+        return self.step_world_velocity_accel(np.array([vel_cmd_x, vel_cmd_y]), accel_ff_world_mps2, vel_world_mps, yaw_rad, gravity_mps2, dt_s)
+
+    def step_body_velocity_accel(self, vel_cmd_body_mps: np.ndarray, accel_ff_body_mps2: np.ndarray, vel_body_mps: np.ndarray, gravity_mps2: float, dt_s: float) -> Tuple[float, float]:
+        accel_body_x = accel_ff_body_mps2[0] + self.velocity_pid_x.step(vel_cmd_body_mps[0] - vel_body_mps[0], dt_s)
+        accel_body_y = accel_ff_body_mps2[1] + self.velocity_pid_y.step(vel_cmd_body_mps[1] - vel_body_mps[1], dt_s)
+        return self._body_accel_to_attitude(accel_body_x, accel_body_y, gravity_mps2)
 
 
 @dataclass
@@ -161,7 +181,7 @@ class CoaxialController:
         dt_s = system.simulation.dt_s
         hover_pwm = (
             np.sqrt(
-                system.vehicle.mass_kg * system.vehicle.gravity_mps2
+                (system.vehicle.mass_kg + system.suspended_load.payload_mass_kg) * system.vehicle.gravity_mps2
                 / (system.vehicle.max_thrust_n * np.sum(system.layout.layer_scale))
             )
             * system.vehicle.max_pwm
@@ -230,20 +250,49 @@ class CoaxialController:
         position = truth["position_m"]
         velocity = truth["velocity_mps"]
         accel_world = truth["accel_world_mps2"]
-
-        roll_cmd_deg, pitch_cmd_deg = self.horizontal_axis.step(
-            pos_cmd_m=np.array([command["x_m"], command["y_m"]]),
-            pos_m=position[:2],
-            vel_mps=velocity[:2],
-            yaw_rad=euler_deg[2] * DEG2RAD,
-            gravity_mps2=gravity_mps2,
-            dt_s=dt_s,
-        )
+        horizontal_mode = command.get("horizontal_mode", "position")
+        if horizontal_mode == "body_velocity_accel":
+            roll_cmd_deg, pitch_cmd_deg = self.horizontal_axis.step_body_velocity_accel(
+                vel_cmd_body_mps=np.array([command.get("vx_body_mps", 0.0), command.get("vy_body_mps", 0.0)]),
+                accel_ff_body_mps2=np.array([command.get("ax_body_mps2", 0.0), command.get("ay_body_mps2", 0.0)]),
+                vel_body_mps=np.array(truth.get("body_velocity_mps", np.zeros(3))[:2]),
+                gravity_mps2=gravity_mps2,
+                dt_s=dt_s,
+            )
+        elif horizontal_mode == "world_velocity_accel":
+            roll_cmd_deg, pitch_cmd_deg = self.horizontal_axis.step_world_velocity_accel(
+                vel_cmd_world_mps=np.array([command.get("vx_mps", 0.0), command.get("vy_mps", 0.0)]),
+                accel_ff_world_mps2=np.array([command.get("ax_mps2", 0.0), command.get("ay_mps2", 0.0)]),
+                vel_world_mps=velocity[:2],
+                yaw_rad=euler_deg[2] * DEG2RAD,
+                gravity_mps2=gravity_mps2,
+                dt_s=dt_s,
+            )
+        elif horizontal_mode == "position_velocity_accel":
+            roll_cmd_deg, pitch_cmd_deg = self.horizontal_axis.step_position_velocity_accel(
+                pos_cmd_m=np.array([command.get("x_m", 0.0), command.get("y_m", 0.0)]),
+                vel_ff_world_mps=np.array([command.get("vx_mps", 0.0), command.get("vy_mps", 0.0)]),
+                accel_ff_world_mps2=np.array([command.get("ax_mps2", 0.0), command.get("ay_mps2", 0.0)]),
+                pos_world_m=position[:2],
+                vel_world_mps=velocity[:2],
+                yaw_rad=euler_deg[2] * DEG2RAD,
+                gravity_mps2=gravity_mps2,
+                dt_s=dt_s,
+            )
+        else:
+            roll_cmd_deg, pitch_cmd_deg = self.horizontal_axis.step_position(
+                pos_cmd_m=np.array([command["x_m"], command["y_m"]]),
+                pos_m=position[:2],
+                vel_mps=velocity[:2],
+                yaw_rad=euler_deg[2] * DEG2RAD,
+                gravity_mps2=gravity_mps2,
+                dt_s=dt_s,
+            )
         servo_roll = self.roll_axis.step(roll_cmd_deg, euler_deg[0], body_rates_degps[0], dt_s)
         servo_pitch = -self.pitch_axis.step(pitch_cmd_deg, euler_deg[1], body_rates_degps[1], dt_s)
-        servo_yaw = -self.yaw_axis.step(command["yaw_deg"], euler_deg[2], body_rates_degps[2], dt_s)
+        servo_yaw = -self.yaw_axis.step(command.get("yaw_deg", 0.0), euler_deg[2], body_rates_degps[2], dt_s)
         servo_thro = self.altitude_axis.step(
-            altitude_cmd_m=command["z_m"],
+            altitude_cmd_m=command.get("z_m", 0.0),
             altitude_m=position[2],
             vel_z_mps=velocity[2],
             accel_z_mps2=accel_world[2],
